@@ -1,6 +1,6 @@
 # ==========================================
 # COMPREHENSIVE TIDYMODELS WORKFLOW
-# Step-by-Step Implementation with Parallel Computing
+# Step-by-Step Implementation 
 # ==========================================
 
 # ==========================================
@@ -28,7 +28,6 @@ library(foreach)
 library(earth)
 
 tidymodels_prefer()
-
 
 # ==========================================
 # STEP 2: PARALLEL COMPUTING SETUP
@@ -89,6 +88,9 @@ CORR_THRESHOLD <- 0.9 # Threshold of absolute correlation values to potentially 
 POLY_DEGREE <- 2 # Create new columns that are basis expansions of variables using orthogonal polynomials
 NS_DEG_FREE <- 3 # Create new columns that are basis expansions of variables using natural splines
 
+# STEP 10A: MODEL-SPECIFIC RECIPES CREATION
+CREATE_MODEL_SPECIFIC_RECIPES <- TRUE # Create specialized recipes for each model type
+
 # STEP 13: HYPERPARAMETER TUNING SETUP
 USE_RACING <- TRUE # Use racing for efficient tuning
 
@@ -108,6 +110,7 @@ cat("Configuration set:\n",
     paste("- Test split:", TEST_SPLIT, "\n"),
     paste("- CV setup:", CV_FOLDS, "folds x", CV_REPEATS, "repeats\n"),
     paste("- Feature engineering:", FEATURE_ENGINEERING, "\n"),
+    paste("- Model-specific recipes:", CREATE_MODEL_SPECIFIC_RECIPES, "\n"),
     paste("- Use racing:", USE_RACING, "\n"),
     paste("- Stack ensemble:", STACK_ENSEMBLE, "\n\n"))
 
@@ -222,19 +225,21 @@ if (OUTCOME_TYPE %in% c("binary", "multiclass")) {
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-cat(paste("Training set:", nrow(train_data), "observations\n"),
-    paste("Test set:", nrow(test_data), "observations\n"))
-
-# Check outcome distribution
-if (OUTCOME_TYPE == "regression") {
-  cat("\nOutcome distribution in training set:\n")
-  print(summary(train_data[[OUTCOME_VAR]]))
-} else {
-  cat("\nOutcome distribution in training set:\n")
-  print(table(train_data[[OUTCOME_VAR]]))
+{
+  cat(paste("Training set:", nrow(train_data), "observations\n"),
+      paste("Test set:", nrow(test_data), "observations\n"))
+  
+  # Check outcome distribution
+  if (OUTCOME_TYPE == "regression") {
+    cat("\nOutcome distribution in training set:\n")
+    print(summary(train_data[[OUTCOME_VAR]]))
+  } else {
+    cat("\nOutcome distribution in training set:\n")
+    print(table(train_data[[OUTCOME_VAR]]))
+  }
+  
+  cat("\n")
 }
-
-cat("\n")
 
 # ==========================================
 # STEP 8: CROSS-VALIDATION SETUP
@@ -273,17 +278,19 @@ if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) {
     step_smote(all_outcomes(), neighbors = SMOTE_NEIGHBORS)
 }
 
-cat("Base recipe created with:\n",
-    "- Zero and near-zero variance removal\n",
-    "- KNN imputation for numeric variables\n",
-    "- Mode imputation for categorical variables\n",
-    "- Rare category collapsing (1% threshold)\n",
-    "- Dummy variable encoding\n",
-    "- Numeric normalization\n")
-if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) {
-  cat("- SMOTE for class imbalance\n")
+{
+  cat("Base recipe created with:\n",
+      "- Zero and near-zero variance removal\n",
+      "- KNN imputation for numeric variables\n",
+      "- Mode imputation for categorical variables\n",
+      "- Rare category collapsing (1% threshold)\n",
+      "- Dummy variable encoding\n",
+      "- Numeric normalization\n")
+  if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) {
+    cat("- SMOTE for class imbalance\n")
+  }
+  cat("\n")
 }
-cat("\n")
 
 # ==========================================
 # STEP 10: ADVANCED FEATURE ENGINEERING RECIPE
@@ -353,6 +360,93 @@ if (FEATURE_ENGINEERING) {
 }
 
 # ==========================================
+# STEP 10A: MODEL-SPECIFIC RECIPES CREATION
+# ==========================================
+
+if (CREATE_MODEL_SPECIFIC_RECIPES) {
+  cat("=== CREATING MODEL-SPECIFIC RECIPES ===\n")
+  
+  # 1. MINIMAL RECIPE FOR TREE-BASED MODELS
+  # Tree-based models can handle categorical data natively and require minimal preprocessing
+  tree_recipe <- recipe(as.formula(paste(OUTCOME_VAR, "~ .")), data = train_data) %>%
+    step_zv(all_predictors()) %>%                              # Remove zero-variance predictors
+    step_impute_knn(all_numeric_predictors(), neighbors = KNN_NEIGHBORS) %>%  # Impute missing numeric
+    step_impute_mode(all_nominal_predictors()) %>%             # Impute missing categorical
+    step_other(all_nominal_predictors(), threshold = RARE_CATEGORY_THRESHOLD) %>%  # Handle rare categories
+    {if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) 
+      step_smote(., all_outcomes(), neighbors = SMOTE_NEIGHBORS) else .}       # Optional SMOTE
+  
+  # 2. LINEAR MODEL RECIPE
+  # Linear models need dummy variables and normalization
+  linear_recipe <- recipe(as.formula(paste(OUTCOME_VAR, "~ .")), data = train_data) %>%
+    step_zv(all_predictors()) %>%                              # Remove zero-variance predictors
+    step_nzv(all_predictors()) %>%                             # Remove near-zero-variance predictors
+    step_impute_knn(all_numeric_predictors(), neighbors = KNN_NEIGHBORS) %>%  # Impute missing numeric
+    step_impute_mode(all_nominal_predictors()) %>%             # Impute missing categorical
+    step_other(all_nominal_predictors(), threshold = RARE_CATEGORY_THRESHOLD) %>%  # Handle rare categories
+    step_dummy(all_nominal_predictors()) %>%                   # Create dummy variables
+    step_normalize(all_numeric_predictors()) %>%               # Normalize for regularization
+    step_corr(all_numeric_predictors(), threshold = 0.95) %>%  # Remove highly correlated predictors
+    {if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) 
+      step_smote(., all_outcomes(), neighbors = SMOTE_NEIGHBORS) else .}       # Optional SMOTE
+  
+  # 3. DISTANCE-BASED MODEL RECIPE (SVM, Neural Networks)
+  # These models are very sensitive to scaling and feature selection
+  distance_recipe <- recipe(as.formula(paste(OUTCOME_VAR, "~ .")), data = train_data) %>%
+    step_zv(all_predictors()) %>%                              # Remove zero-variance predictors
+    step_nzv(all_predictors()) %>%                             # Remove near-zero-variance predictors
+    step_impute_knn(all_numeric_predictors(), neighbors = KNN_NEIGHBORS) %>%  # Impute missing numeric
+    step_impute_mode(all_nominal_predictors()) %>%             # Impute missing categorical
+    step_other(all_nominal_predictors(), threshold = RARE_CATEGORY_THRESHOLD) %>%  # Handle rare categories
+    step_dummy(all_nominal_predictors()) %>%                   # Create dummy variables
+    step_YeoJohnson(all_numeric_predictors()) %>%              # Transform skewed distributions
+    step_normalize(all_numeric_predictors()) %>%               # Critical: normalize all features
+    step_corr(all_numeric_predictors(), threshold = 0.9) %>%   # Remove correlated features
+    step_pca(all_numeric_predictors(), threshold = 0.95) %>%   # Optional: dimension reduction
+    {if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) 
+      step_smote(., all_outcomes(), neighbors = SMOTE_NEIGHBORS) else .}       # Optional SMOTE
+  
+  # 4. MARS-SPECIFIC RECIPE
+  # MARS can handle some nonlinearity but benefits from preprocessing
+  mars_recipe <- recipe(as.formula(paste(OUTCOME_VAR, "~ .")), data = train_data) %>%
+    step_zv(all_predictors()) %>%                              # Remove zero-variance predictors
+    step_nzv(all_predictors()) %>%                             # Remove near-zero-variance predictors
+    step_impute_knn(all_numeric_predictors(), neighbors = KNN_NEIGHBORS) %>%  # Impute missing numeric
+    step_impute_mode(all_nominal_predictors()) %>%             # Impute missing categorical
+    step_other(all_nominal_predictors(), threshold = RARE_CATEGORY_THRESHOLD) %>%  # Handle rare categories
+    step_dummy(all_nominal_predictors()) %>%                   # Create dummy variables
+    step_normalize(all_numeric_predictors()) %>%               # Normalize numeric predictors
+    {if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) 
+      step_smote(., all_outcomes(), neighbors = SMOTE_NEIGHBORS) else .}       # Optional SMOTE
+  
+  # 5. CUBIST-SPECIFIC RECIPE (minimal preprocessing like trees but with some optimization)
+  cubist_recipe <- recipe(as.formula(paste(OUTCOME_VAR, "~ .")), data = train_data) %>%
+    step_zv(all_predictors()) %>%                              # Remove zero-variance predictors
+    step_impute_knn(all_numeric_predictors(), neighbors = KNN_NEIGHBORS) %>%  # Impute missing numeric
+    step_impute_mode(all_nominal_predictors()) %>%             # Impute missing categorical
+    step_other(all_nominal_predictors(), threshold = RARE_CATEGORY_THRESHOLD) %>%  # Handle rare categories
+    step_dummy(all_nominal_predictors()) %>%                   # Cubist needs dummy variables
+    {if (OUTCOME_TYPE %in% c("binary", "multiclass") && HANDLE_CLASS_IMBALANCE) 
+      step_smote(., all_outcomes(), neighbors = SMOTE_NEIGHBORS) else .}       # Optional SMOTE
+  
+  cat("Model-specific recipes created:\n")
+  cat("- tree_recipe: Minimal preprocessing for tree-based models\n")
+  cat("- linear_recipe: Full preprocessing with regularization considerations\n") 
+  cat("- distance_recipe: Extensive preprocessing for distance-based models\n")
+  cat("- mars_recipe: Moderate preprocessing for MARS models\n")
+  cat("- cubist_recipe: Rule-based model preprocessing\n\n")
+  
+} else {
+  # Use base recipe for all models if model-specific recipes are disabled
+  tree_recipe <- base_recipe
+  linear_recipe <- base_recipe  
+  distance_recipe <- base_recipe
+  mars_recipe <- base_recipe
+  cubist_recipe <- base_recipe
+  cat("=== USING BASE RECIPE FOR ALL MODELS (Model-specific recipes disabled) ===\n\n")
+}
+
+# ==========================================
 # STEP 11: MODEL SPECIFICATIONS
 # ==========================================
 
@@ -404,21 +498,10 @@ if (OUTCOME_TYPE == "regression") {
   cubist_spec <- cubist_rules(committees = tune(), neighbors = tune()) %>%
     set_engine("Cubist")
   
-  model_list <- list(
-    linear_reg = linear_spec,
-    random_forest = rf_spec,
-    xgboost = xgb_spec,
-    mars = mars_spec,
-    svm_rbf = svm_spec,
-    neural_net = nnet_spec,
-    bagged_tree = bag_spec,
-    cubist = cubist_spec
-  )
-  
 } else {  # Classification
   
   # Logistic Regression
-  logistic_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>%
+  linear_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>%
     set_engine("glmnet")
   
   # Random Forest
@@ -461,8 +544,25 @@ if (OUTCOME_TYPE == "regression") {
     set_engine("naivebayes") %>%
     set_mode("classification")
   
+  # Remove cubist for classification (not available)
+  cubist_spec <- NULL
+}
+
+# Create model list with appropriate models for the outcome type
+if (OUTCOME_TYPE == "regression") {
   model_list <- list(
-    logistic_reg = logistic_spec,
+    linear_reg = linear_spec,
+    random_forest = rf_spec,
+    xgboost = xgb_spec,
+    mars = mars_spec,
+    svm_rbf = svm_spec,
+    neural_net = nnet_spec,
+    bagged_tree = bag_spec,
+    cubist = cubist_spec
+  )
+} else {
+  model_list <- list(
+    logistic_reg = linear_spec,
     random_forest = rf_spec,
     xgboost = xgb_spec,
     mars = mars_spec,
@@ -473,41 +573,191 @@ if (OUTCOME_TYPE == "regression") {
   )
 }
 
-cat(paste("Created", length(model_list), "model specifications:\n"))
-for (name in names(model_list)) {
-  cat(paste("-", name, "\n"))
+{
+  cat(paste("Created", length(model_list), "model specifications:\n"))
+  for (name in names(model_list)) {
+    cat(paste("-", name, "\n"))
+  }
+  cat("\n")
 }
-cat("\n")
 
 # ==========================================
-# STEP 12: WORKFLOW SETS CREATION
+# STEP 12: ENHANCED WORKFLOW SETS CREATION WITH MODEL-SPECIFIC RECIPES
 # ==========================================
 
-cat("=== WORKFLOW SETS CREATION ===\n")
+cat("=== ENHANCED WORKFLOW SETS CREATION ===\n")
 
-# Create workflow sets combining recipes and models
-if (FEATURE_ENGINEERING) {
-  recipe_list <- list(
-    basic = base_recipe,
-    engineered = fe_recipe
+if (CREATE_MODEL_SPECIFIC_RECIPES) {
+  
+  # Create optimized recipe list based on model requirements
+  if (FEATURE_ENGINEERING) {
+    optimized_recipe_list <- list(
+      # Tree-based models: minimal preprocessing
+      tree_minimal = tree_recipe,
+      
+      # Linear models: full preprocessing with regularization
+      linear_full = linear_recipe,
+      
+      # Distance-based models: extensive preprocessing
+      distance_scaled = distance_recipe,
+      
+      # MARS: moderate preprocessing
+      mars_moderate = mars_recipe,
+      
+      # Cubist: rule-based preprocessing
+      cubist_rules = if("cubist" %in% names(model_list)) cubist_recipe else NULL,
+      
+      # Advanced feature engineering for comparison
+      fe_advanced = fe_recipe,
+      
+      # Base recipe for comparison
+      base_simple = base_recipe
+    )
+  } else {
+    optimized_recipe_list <- list(
+      # Tree-based models: minimal preprocessing
+      tree_minimal = tree_recipe,
+      
+      # Linear models: full preprocessing
+      linear_full = linear_recipe,
+      
+      # Distance-based models: extensive preprocessing  
+      distance_scaled = distance_recipe,
+      
+      # MARS: moderate preprocessing
+      mars_moderate = mars_recipe,
+      
+      # Cubist: rule-based preprocessing
+      cubist_rules = if("cubist" %in% names(model_list)) cubist_recipe else NULL,
+      
+      # Base recipe for comparison
+      base_simple = base_recipe
+    )
+  }
+  
+  # Remove NULL recipes
+  optimized_recipe_list <- optimized_recipe_list[!sapply(optimized_recipe_list, is.null)]
+  
+  # Create optimized model subsets for specific recipes
+  tree_models <- model_list[intersect(c("random_forest", "bagged_tree"), names(model_list))]
+  linear_models <- model_list[intersect(if(OUTCOME_TYPE == "regression") "linear_reg" else "logistic_reg", names(model_list))]
+  distance_models <- model_list[intersect(c("svm_rbf", "neural_net"), names(model_list))]
+  mars_models <- model_list[intersect("mars", names(model_list))]
+  cubist_models <- if("cubist" %in% names(model_list)) model_list["cubist"] else list()
+  
+  # Create individual workflow sets for each recipe type
+  workflow_sets_list <- list()
+  
+  # Tree models with minimal preprocessing
+  if (length(tree_models) > 0) {
+    workflow_sets_list[["tree"]] <- workflow_set(
+      preproc = list(tree_minimal = optimized_recipe_list[["tree_minimal"]]),
+      models = tree_models,
+      cross = TRUE
+    )
+  }
+  
+  # Linear models with full preprocessing
+  if (length(linear_models) > 0) {
+    workflow_sets_list[["linear"]] <- workflow_set(
+      preproc = list(linear_full = optimized_recipe_list[["linear_full"]]),
+      models = linear_models,
+      cross = TRUE
+    )
+  }
+  
+  # Distance-based models with extensive preprocessing
+  if (length(distance_models) > 0) {
+    workflow_sets_list[["distance"]] <- workflow_set(
+      preproc = list(distance_scaled = optimized_recipe_list[["distance_scaled"]]),
+      models = distance_models,
+      cross = TRUE
+    )
+  }
+  
+  # MARS models with moderate preprocessing
+  if (length(mars_models) > 0) {
+    workflow_sets_list[["mars"]] <- workflow_set(
+      preproc = list(mars_moderate = optimized_recipe_list[["mars_moderate"]]),
+      models = mars_models,
+      cross = TRUE
+    )
+  }
+  
+  # Cubist models with rule-based preprocessing
+  if (length(cubist_models) > 0 && "cubist_rules" %in% names(optimized_recipe_list)) {
+    workflow_sets_list[["cubist"]] <- workflow_set(
+      preproc = list(cubist_rules = optimized_recipe_list[["cubist_rules"]]),
+      models = cubist_models,
+      cross = TRUE
+    )
+  }
+  
+  # Add comparison workflows using base recipe for all models
+  workflow_sets_list[["base_comparison"]] <- workflow_set(
+    preproc = list(base_simple = optimized_recipe_list[["base_simple"]]),
+    models = model_list,
+    cross = TRUE
   )
+  
+  # Add advanced feature engineering comparison if enabled
+  if (FEATURE_ENGINEERING && "fe_advanced" %in% names(optimized_recipe_list)) {
+    workflow_sets_list[["fe_comparison"]] <- workflow_set(
+      preproc = list(fe_advanced = optimized_recipe_list[["fe_advanced"]]),
+      models = model_list,
+      cross = TRUE
+    )
+  }
+  
+  # Combine all workflow sets while preserving the workflow_set class
+  # We'll use do.call(rbind, ...) which preserves the class better than bind_rows
+  all_workflows_list <- workflow_sets_list[lengths(workflow_sets_list) > 0]
+  
+  if (length(all_workflows_list) > 1) {
+    # Combine multiple workflow sets
+    all_workflows <- do.call(rbind, all_workflows_list)
+    
+    # Ensure it maintains the workflow_set class
+    class(all_workflows) <- c("workflow_set", class(all_workflows))
+  } else if (length(all_workflows_list) == 1) {
+    all_workflows <- all_workflows_list[[1]]
+  } else {
+    stop("No valid workflow sets were created")
+  }
+  
+  cat("Enhanced workflow sets created with model-specific preprocessing:\n")
+  cat(paste("- Total workflows:", nrow(all_workflows), "\n"))
+  cat(paste("- Recipe types:", length(optimized_recipe_list), "\n"))
+  cat(paste("- Model types:", length(model_list), "\n"))
+  cat(paste("- Workflow set class:", paste(class(all_workflows), collapse = ", "), "\n"))
+  
 } else {
-  recipe_list <- list(
-    basic = base_recipe
+  # Original workflow creation
+  if (FEATURE_ENGINEERING) {
+    recipe_list <- list(
+      basic = base_recipe,
+      engineered = fe_recipe
+    )
+  } else {
+    recipe_list <- list(
+      basic = base_recipe
+    )
+  }
+  
+  all_workflows <- workflow_set(
+    preproc = recipe_list,
+    models = model_list,
+    cross = TRUE
   )
+  
+  cat("Standard workflow sets created:\n")
+  cat(paste("- Total workflows:", nrow(all_workflows), "\n"))
+  cat(paste("- Recipe types:", length(recipe_list), "\n"))
+  cat(paste("- Model types:", length(model_list), "\n"))
+  cat(paste("- Workflow set class:", paste(class(all_workflows), collapse = ", "), "\n"))
 }
 
-all_workflows <- workflow_set(
-  preproc = recipe_list,
-  models = model_list,
-  cross = TRUE
-)
-
-cat(paste("Created", nrow(all_workflows), "workflow combinations:\n"),
-    paste("- Recipes:", length(recipe_list), "\n"),
-    paste("- Models:", length(model_list), "\n"),
-    paste("- Total workflows:", nrow(all_workflows), "\n\n"))
-
+cat("\nWorkflow combinations:\n")
 print(all_workflows)
 
 # ==========================================
@@ -619,10 +869,10 @@ cat(paste("\nBest performing model:", best_workflow_id, "\n"),
     paste("Best", PRIMARY_METRIC, ":", round(best_performance, 4), "\n\n"))
 
 # ==========================================
-# STEP 16: VISUALIZE RESULTS
+# STEP 16: ENHANCED RESULTS VISUALIZATION
 # ==========================================
 
-cat("=== RESULTS VISUALIZATION ===\n")
+cat("=== ENHANCED RESULTS VISUALIZATION ===\n")
 
 # Plot model comparison
 p1 <- autoplot(grid_results, metric = PRIMARY_METRIC) +
@@ -638,14 +888,33 @@ model_comparison <- results_summary %>%
     worst_performance = ifelse(MAXIMIZE_METRIC, min(mean), max(mean)),
     n_configs = n(),
     .groups = "drop"
-  ) %>%
-  arrange(ifelse(MAXIMIZE_METRIC, desc(best_performance), best_performance))
+  ) 
+
+if (MAXIMIZE_METRIC) {
+  model_comparison_best <- model_comparison %>% 
+    arrange(desc(best_performance))
+} else {
+  model_comparison_best <- model_comparison %>% 
+    arrange(best_performance)
+}
+
+if (MAXIMIZE_METRIC) {
+  model_comparison_mean <- model_comparison %>% 
+    arrange(desc(mean_performance))
+} else {
+  model_comparison_mean <- model_comparison %>% 
+    arrange(mean_performance)
+}
+
+model_comparison <- model_comparison_best
 
 cat("\nPerformance by model type:\n")
-print(model_comparison)
+print(model_comparison_best)
+print(model_comparison_mean)
 
-# Recipe comparison if multiple recipes used
-if (FEATURE_ENGINEERING) {
+
+# Recipe comparison if model-specific recipes used
+if (CREATE_MODEL_SPECIFIC_RECIPES) {
   recipe_comparison <- results_summary %>%
     separate(wflow_id, into = c("recipe", "model"), sep = "_", extra = "merge") %>%
     group_by(recipe) %>%
@@ -659,9 +928,27 @@ if (FEATURE_ENGINEERING) {
   
   cat("\nPerformance by recipe type:\n")
   print(recipe_comparison)
+  
+  # Recipe-Model combination analysis
+  recipe_model_comparison <- results_summary %>%
+    separate(wflow_id, into = c("recipe", "model"), sep = "_", extra = "merge") %>%
+    group_by(recipe, model) %>%
+    summarise(
+      performance = mean(mean),
+      .groups = "drop"
+    ) %>%
+    arrange(ifelse(MAXIMIZE_METRIC, desc(performance), performance))
+  
+  cat("\nTop recipe-model combinations:\n")
+  print(recipe_model_comparison %>% slice_head(n = 10))
 }
 
 cat("\n")
+
+# ==========================================
+# CONTINUE WITH REMAINING STEPS...
+# (Steps 17-21 remain the same as in the original workflow)
+# ==========================================
 
 # ==========================================
 # STEP 17: ENSEMBLE STACKING (OPTIONAL)
@@ -674,6 +961,9 @@ if (STACK_ENSEMBLE) {
   cat("Creating model stack...\n")
   model_stack <- stacks() %>%
     add_candidates(grid_results)
+  
+  model_stack <- stacks() %>%
+    add_candidates(grid_results, name = "grid_results")
   
   cat(paste("Model stack created with", ncol(model_stack) - 1, "candidate members\n"))
   
@@ -707,10 +997,9 @@ if (STACK_ENSEMBLE) {
   
   # Show ensemble details
   cat("\nEnsemble composition:\n")
-  ensemble_members <- collect_parameters(fitted_stack) %>%
+  collect_parameters(fitted_stack, "grid_results") %>%
     filter(coef > 0) %>%
     arrange(desc(coef))
-  print(ensemble_members)
   
 } else {
   fitted_stack <- NULL
@@ -856,19 +1145,30 @@ if (!is.null(fitted_stack)) {
 # STEP 21: SUMMARY AND CLEANUP
 # ==========================================
 
-cat("\n=== WORKFLOW SUMMARY ===\n")
+cat("\n=== ENHANCED WORKFLOW SUMMARY ===\n")
 
 total_time <- Sys.time() - start_time
 cat(paste("Total workflow time:", round(total_time, 2), units(total_time), "\n"),
     paste("Best individual model:", best_workflow_id, "\n"),
     paste("Best", PRIMARY_METRIC, ":", round(best_performance, 4), "\n"))
 
+if (CREATE_MODEL_SPECIFIC_RECIPES) {
+  cat("Enhanced features used:\n")
+  cat("- Model-specific preprocessing recipes\n")
+  cat("- Optimized recipe-model combinations\n")
+}
+
 if (!is.null(fitted_stack)) {
-  cat(paste("Ensemble members:", nrow(ensemble_members), "\n"))
+  cat(paste("Ensemble members:", nrow(fitted_stack), "\n"))
   cat(paste("Ensemble", PRIMARY_METRIC, ":", round(ensemble_perf, 4), "\n"))
 }
 
-cat("\nWorkflow completed successfully!\n")
+cat("\nEnhanced workflow completed successfully!\n",
+    "Key improvements:\n",
+    "- Model-specific preprocessing optimizes each algorithm\n",
+    "- Tree models use minimal preprocessing\n",
+    "- Distance-based models get extensive normalization\n",
+    "- Linear models get appropriate regularization preprocessing\n")
 
 # Stop parallel cluster
 stopCluster(cl)
@@ -881,13 +1181,13 @@ cat("\nParallel cluster stopped.\n")
 # Uncomment to save results
 # save(
 #   grid_results, final_fit, fitted_stack, test_metrics,
-#   file = paste0("modeling_results_", Sys.Date(), ".RData")
+#   file = paste0("enhanced_modeling_results_", Sys.Date(), ".RData")
 # )
 # 
-# cat("Results saved to modeling_results_", Sys.Date(), ".RData\n")
+# cat("Results saved to enhanced_modeling_results_", Sys.Date(), ".RData\n")
 
 # ==========================================
-# UTILITY CODE FOR FURTHER ANALYSIS
+# ENHANCED UTILITY CODE FOR FURTHER ANALYSIS
 # ==========================================
 
 # Function to examine specific model results
@@ -899,14 +1199,23 @@ examine_model <- function(workflow_id) {
     arrange(desc(mean))
 }
 
-examine_model("basic_cubist")
+# Function to compare recipes for a specific model
+compare_recipes_for_model <- function(model_name) {
+  if (CREATE_MODEL_SPECIFIC_RECIPES) {
+    results_summary %>%
+      separate(wflow_id, into = c("recipe", "model"), sep = "_", extra = "merge") %>%
+      filter(model == model_name) %>%
+      select(recipe, model, mean, std_err, rank) %>%
+      arrange(rank)
+  } else {
+    cat("Model-specific recipes not enabled. Set CREATE_MODEL_SPECIFIC_RECIPES = TRUE\n")
+  }
+}
 
 # Function to get predictions from best model
 get_predictions <- function() {
   collect_predictions(final_fit)
 }
-
-get_predictions()
 
 # Function to compare all models
 compare_all_models <- function() {
@@ -917,10 +1226,32 @@ compare_all_models <- function() {
     arrange(rank)
 }
 
-compare_all_models()
+# Function to show recipe usage summary
+show_recipe_usage <- function() {
+  if (CREATE_MODEL_SPECIFIC_RECIPES) {
+    results_summary %>%
+      separate(wflow_id, into = c("recipe", "model"), sep = "_", extra = "merge") %>%
+      count(recipe, model) %>%
+      arrange(recipe, model)
+  } else {
+    cat("Model-specific recipes not enabled. Set CREATE_MODEL_SPECIFIC_RECIPES = TRUE\n")
+  }
+}
 
-cat("\nUtility functions available:\n",
-    "- examine_model(workflow_id'): Detailed results for specific model\n",
-    "- get_predictions(): Get test set predictions from best model\n",
-    "- compare_all_models(): Compare all model performances\n",
-    "\nExample: examine_model('", best_workflow_id, "')\n")
+if (FALSE) {
+  # Detailed results for specific model
+  examine_model("base_simple_cubist")
+  
+  # Compare preprocessing approaches for a model
+  compare_recipes_for_model("simple_cubist")
+  
+  # Get test set predictions from best model
+  get_predictions()
+  
+  # Compare all model performances
+  compare_all_models()
+  
+  # Show which recipes were used with which models
+  show_recipe_usage()
+}
+
